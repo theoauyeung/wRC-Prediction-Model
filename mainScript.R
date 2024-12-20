@@ -39,7 +39,7 @@ data <- data %>%
 #   drop_na(BBpercent, Kpercent, wRCplus, wRCplus_next)
 
 
-# Read year-specific data
+
 data24 <- fread("baseball data - 2024.csv") %>% 
   mutate(year = as.integer(2024)) %>% 
   rename(
@@ -86,8 +86,7 @@ data18<- fread("baseball data - 2018.csv")%>%
   
 
 
-# Protected names handling (as in original script)
-protected_names <- c(
+# accounting for discrepancies in names in the data
   "Bobby Witt Jr.", "Vladimir Guerrero Jr.", "Jazz Chisholm Jr.",
   "Luis García Jr.", "Lourdes Gurriel Jr.", "Ronald Acuña Jr.",
   "Luis Robert Jr.", "Fernando Tatis Jr.", "LaMonte Wade Jr.", "Nelson Cruz", "Jackie Bradley Jr."
@@ -113,14 +112,14 @@ merged_data <- rbindlist(list(data24, data23, data22, data21, data19, data18), u
 
 
 
-# Final merged data preparation
+
 final_merged_data <- merge(merged_data, data, by = c("Name", "year"), all = TRUE) %>%
   dplyr::select(Name, year, wRCplus, k_percent, bb_percent, 
           exit_velocity_avg, AVG, ISO,
          launch_angle_avg, hard_hit_percent, opposite_percent, pull_percent, swing_percent, whiff_percent,
          groundballs_percent, flyballs_percent)
 
-# Prepare data for prediction of next year's wRC+
+# preparing data for prediction
 data_processed <- final_merged_data %>%
   arrange(Name, year) %>%
   group_by(Name) %>%
@@ -129,9 +128,11 @@ data_processed <- final_merged_data %>%
     wRCplus_next = case_when(year < 2024 ~ lead(wRCplus), 
                              year == 2024 ~ NA)
   ) %>%
-  # Remove rows where we don't have next season's data
+
   filter(!is.na(wRCplus_next))
 
+
+# data to be used in prediction 
 data_processed_for_prediction <- final_merged_data %>%
   arrange(Name, year) %>%
   group_by(Name) %>%
@@ -140,7 +141,6 @@ data_processed_for_prediction <- final_merged_data %>%
     wRCplus_next = case_when(year < 2024 ~ lead(wRCplus), 
                              year == 2024 ~ NA)
   ) %>%
-  # Remove rows where we don't have next season's data
   filter(ifelse(year == 2024, TRUE, !is.na(wRCplus_next)))
 
 # 
@@ -161,7 +161,7 @@ data_processed_for_prediction <- final_merged_data %>%
 
 data_processed <- na.omit(data_processed)
 
-# Define predictors (expanded from original)
+# our predictors
 predictors <- c(
   "k_percent", "bb_percent", 
   "exit_velocity_avg", "AVG", "ISO",
@@ -172,7 +172,7 @@ predictors <- c(
 
 
 
-# Prepare data for modeling
+# preparing for modeling
 model_data <- data_processed %>%
   dplyr::select(Name, year, wRCplus_next, all_of(predictors)) %>%
   drop_na()
@@ -185,7 +185,7 @@ X<- as.matrix(X)
 
 y <- model_data$wRCplus_next
 
-# Set seed for reproducibility
+
 set.seed(123)
 
 # default RF model
@@ -197,7 +197,7 @@ m1 <- randomForest(
 which.min(m1$mse)
 sqrt(m1$mse[which.min(m1$mse)])
 
-# Feature Importance Random Forest
+# feature importance
 rf_model <- randomForest(x = X, y = y, 
                          importance = TRUE, 
                          ntree = 402, 
@@ -218,43 +218,43 @@ ggplot(feature_importance, aes(x = reorder(Predictor, Importance), y = Importanc
        x = "Predictors", 
        y = "Importance Score") 
 
-# Predict next season's wRC+ for all players
-# Prepare the prediction dataset
+# predicting using the processed_for_prediction dataset
+
 prediction_data <- data_processed_for_prediction%>%
   group_by(Name) %>%
   filter(year == 2024) %>%
   dplyr::select(Name, year, all_of(predictors)) %>%
   drop_na()
 
+prediction_data_rf <- prediction_data
+
 X_pred <- prediction_data[, !(names(prediction_data) %in% c("Name", "year"))]
-# Prepare X for prediction
 X_pred <- 
   as.matrix(X_pred)
 
 
 
-#Try a simplified cross-validation
+# cross validation
 control_rf <- trainControl(method = "cv",
                         number = 4,
                         verboseIter = TRUE)
 
-# Modify the train call
+
 rf_cv <- train(
   x = X,
   y = y,
   method = "rf",
   trControl = control_rf,
   importance = TRUE,
-  ntree = 402,  # Reduce number of trees if computationally intensive
+  ntree = 402,  
   tuneLength = 3,
-  # Limit the number of tuning parameters
 )
 
 
-# Multiple model ensemble
+
 library(caretEnsemble)
 
-# Define multiple models
+# multiple models
 control <- trainControl(
   method = "repeatedcv",
   number = 5,
@@ -263,16 +263,16 @@ control <- trainControl(
   classProbs = TRUE
 )
 
-# Train multiple models
+
 model_list <- caretList(
-  x = X,  # Use X directly
-  y = y,  # Use y directly
+  x = X, 
+  y = y, 
   trControl = control,
   methodList = c("rf", "xgbTree", "glmnet")
 )
 
 
-# Create ensemble model
+# creating ensemble method
 ensemble_predictions <- caretEnsemble(
   model_list,
   metric = "RMSE",
@@ -283,11 +283,16 @@ ensemble_predictions <- caretEnsemble(
   )
 )
 
-# Print results
-# print(rf_cv)
 
-# Predict wRC+ for next season
-# prediction_data$predicted_wRCplus_next <- predict(rf_cv, X_pred)
+
+
+# predict wRC+ for next season with random forest
+prediction_data_rf$predicted_wRCplus_next <- predict(rf_cv, X_pred)
+
+top_predictions_rf <- prediction_data_rf %>% 
+  left_join(data24, by = "Name") %>% 
+  dplyr::select(Name, predicted_wRCplus_next, wRCplus)
+
 
 predictions_rf <- predict(model_list$rf, X_pred)
 predictions_xgb <- predict(model_list_wo$xgbTree, X_pred)
@@ -317,7 +322,6 @@ top_differences <- top_predictions %>%
   mutate(difference = predicted_wRCplus_next - wRCplus)
 
 
-# Assuming top_5 and top_predictions are already defined
 top_predictions %>%
   ggplot(aes(x = wRCplus, y = predicted_wRCplus_next)) +
   geom_point(aes(color = ifelse(Name %in% top_5$Name, "Top 5", "Others"))) +
@@ -343,10 +347,10 @@ top_predictions %>%
 
 
 ##### Prediction for 2024 without 2024 data ####
-# Modify merged data to exclude 2024
+
 merged_data_without_2024 <- rbindlist(list(data23, data22, data21, data19, data18), use.names = TRUE, fill = TRUE)
 
-# Final merged data preparation without 2024
+
 final_merged_data_without_2024 <- merge(merged_data_without_2024, data, by = c("Name", "year"), all = TRUE) %>%
   dplyr::select(Name, year, wRCplus, k_percent, bb_percent,
                 exit_velocity_avg, AVG, ISO,
@@ -354,7 +358,7 @@ final_merged_data_without_2024 <- merge(merged_data_without_2024, data, by = c("
                 groundballs_percent, flyballs_percent)
 
 
-# Prepare data for prediction of next year's wRC+
+
 data_processed_without_2024 <- final_merged_data_without_2024 %>%
   arrange(Name, year) %>%
   group_by(Name) %>%
@@ -363,7 +367,6 @@ data_processed_without_2024 <- final_merged_data_without_2024 %>%
     wRCplus_next = case_when(year < 2023 ~ lead(wRCplus), 
                              year == 2023 ~ NA)
   ) %>%
-  # Remove rows where we don't have next season's data
   filter(!is.na(wRCplus_next))
 
 data_processed_for_prediction_without_2024 <- final_merged_data_without_2024 %>%
@@ -374,24 +377,31 @@ data_processed_for_prediction_without_2024 <- final_merged_data_without_2024 %>%
     wRCplus_next = case_when(year < 2023 ~ lead(wRCplus), 
                              year == 2023 ~ NA)
   ) %>%
-  # Remove rows where we don't have next season's data
   filter(ifelse(year == 2023, TRUE, !is.na(wRCplus_next)))
 
 data_processed_without_2024 <- na.omit(data_processed_without_2024)
 
-# Prepare data for modeling
+
 model_data_without_2024 <- data_processed_without_2024 %>%
   dplyr::select(Name, year, wRCplus_next, all_of(predictors)) %>%
   drop_na()
+
+prediction_data_without_2024 <- data_processed_for_prediction_without_2024%>%
+  group_by(Name) %>%
+  filter(year == 2023) %>%
+  dplyr::select(Name, year, all_of(predictors)) %>%
+  drop_na()
+
+prediction_data_rf_wo_2024 <- prediction_data_without_2024
 
 X_without_2024 <- model_data_without_2024[, !(names(model_data_without_2024) %in% c("Name", "year", "wRCplus_next"))]
 X_without_2024 <- as.matrix(X_without_2024)
 y_without_2024 <- model_data_without_2024$wRCplus_next
 
-# Set seed for reproducibility
+
 set.seed(123)
 
-# default RF model
+
 m1_without2024 <- randomForest(
   formula = wRCplus_next ~ .,
   data    = model_data_without_2024
@@ -402,20 +412,20 @@ sqrt(m1$mse[which.min(m1_without2024$mse)])
 
 
 
-# #Cross-validation
-# control <- trainControl(method = "cv",
-#                         number = 6,
-#                         verboseIter = TRUE)
-# 
-# rf_cv_without_2024 <- train(
-#   x = X_without_2024,
-#   y = y_without_2024,
-#   method = "rf",
-#   trControl = control,
-#   importance = TRUE,
-#   ntree = 483,
-#   tuneGrid = expand.grid(mtry = c(2, 3, 4, 5, 6, 7))
-# )
+#Cross-validation
+control <- trainControl(method = "cv",
+                        number = 6,
+                        verboseIter = TRUE)
+
+rf_cv_without_2024 <- train(
+  x = X_without_2024,
+  y = y_without_2024,
+  method = "rf",
+  trControl = control,
+  importance = TRUE,
+  ntree = 483,
+  tuneGrid = expand.grid(mtry = c(2, 3, 4, 5, 6, 7))
+)
 
 
 control_wo <- trainControl(
@@ -451,16 +461,21 @@ X_pred_without_2024 <- prediction_data_without_2024[, !(names(prediction_data_wi
 X_pred_without_2024 <- as.matrix(X_pred_without_2024)
 
 # Predict 2024 wRC+
+prediction_data_rf_wo_2024$predicted_wRCplus_next <- predict(rf_cv_without_2024, X_pred_without_2024)
 
-# Predict using each model in the ensemble
+top_predictions_without_2024_rf <- prediction_data_rf_without_2024 %>%
+  left_join(data24, by = "Name") %>%
+  dplyr::select(Name, predicted_wRCplus_2024, wRCplus)
+
+# predict using each model in the ensemble
 predictions_rf_24 <- predict(model_list_wo$rf, X_pred_without_2024)
 predictions_xgb_24 <- predict(model_list_wo$xgbTree, X_pred_without_2024)
 predictions_glmnet_24 <- predict(model_list_wo$glmnet, X_pred_without_2024)
 
-# Take the mean or median of these predictions
+# take the mean or median of these predictions
 prediction_data_without_2024$predicted_wRCplus_2024 <- (predictions_rf_24 + predictions_xgb_24 + predictions_glmnet_24) / 3
 
-# Sort and analyze predictions
+
 top_predictions_without_2024 <- prediction_data_without_2024 %>%
   left_join(data24, by = "Name") %>%
   dplyr::select(Name, predicted_wRCplus_2024, wRCplus)
